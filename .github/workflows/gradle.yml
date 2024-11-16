@@ -23,6 +23,9 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
@@ -34,6 +37,9 @@ jobs:
     - name: Build Debug APK
       run: ./gradlew assembleDebug --stacktrace
 
+    - name: Build Debug Android Test APK
+      run: ./gradlew assembleDebugAndroidTest --stacktrace
+
     - name: Run Unit Tests
       run: ./gradlew testDebugUnitTest --stacktrace
 
@@ -41,17 +47,27 @@ jobs:
       uses: reactivecircus/android-emulator-runner@v2
       with:
         api-level: 29
-        target: google_apis
+        target: default
         arch: x86_64
-        profile: Nexus 6
-        script: ./gradlew connectedDebugAndroidTest --stacktrace
+        profile: pixel_2
+        emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+        disable-animations: true
+        script: |
+          adb devices
+          adb wait-for-device
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          ./gradlew connectedDebugAndroidTest -x lint --stacktrace
 
     - name: Upload Build Reports
       if: always()
       uses: actions/upload-artifact@v3
       with:
         name: build-reports
-        path: app/build/reports/
+        path: |
+          app/build/reports/
+          app/build/outputs/androidTest-results/
         retention-days: 7
 
     - name: Upload APK
