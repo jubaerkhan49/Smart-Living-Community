@@ -1,68 +1,136 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-# This workflow will build a Java project with Gradle and cache/restore any dependencies to improve the workflow execution time
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-java-with-gradle
-
-name: Java CI with Gradle
+name: Android CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, master ]
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
         java-version: '17'
         distribution: 'temurin'
+        cache: gradle
 
-    # Configure Gradle for optimal use in GitHub Actions, including caching of downloaded dependencies.
-    # See: https://github.com/gradle/actions/blob/main/setup-gradle/README.md
-    - name: Ensure Gradle Wrapper is Executable
-      run: chmod +x ./gradlew
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
-    - name: Build with Gradle Wrapper
-      run: ./gradlew build
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@v3
 
-    # NOTE: The Gradle Wrapper is the default and recommended way to run Gradle (https://docs.gradle.org/current/userguide/gradle_wrapper.html).
-    # If your project does not have the Gradle Wrapper configured, you can use the following configuration to run Gradle with a specified version.
-    #
-    # - name: Setup Gradle
-    #   uses: gradle/actions/setup-gradle@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
-    #   with:
-    #     gradle-version: '8.7'
-    #
-    # - name: Build with Gradle 8.7
-    #   run: ./gradlew build
+    - name: Install Android SDK Tools
+      run: |
+        # Update SDK manager
+        yes | sdkmanager --update
+        
+        # Install necessary components
+        yes | sdkmanager "platform-tools" 
+        yes | sdkmanager "platforms;android-34"
+        yes | sdkmanager "build-tools;34.0.0"
+        yes | sdkmanager "emulator"
+        yes | sdkmanager "system-images;android-34;google_apis;x86_64"
 
-  dependency-submission:
+    - name: Create AVD
+      run: |
+        echo "Creating Android Virtual Device"
+        echo "no" | avdmanager create avd \
+          -n test_emulator \
+          -k "system-images;android-34;google_apis;x86_64" \
+          -d "pixel_6"
 
+    - name: Configure Emulator Settings
+      run: |
+        echo "hardware.ramSize=4096" >> ~/.android/avd/test_emulator.avd/config.ini
+        echo "hw.ramSize=4096" >> ~/.android/avd/test_emulator.avd/config.ini
+        echo "vm.heapSize=256" >> ~/.android/avd/test_emulator.avd/config.ini
+
+    - name: Grant Execute Permission
+      run: chmod +x gradlew
+
+    - name: Decode Google Services JSON
+      env:
+        FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
+      run: |
+        echo "$FIREBASE_CONFIG" > app/google-services.json
+
+    - name: Run Android Instrumentation Tests
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 34
+        target: google_apis
+        arch: x86_64
+        profile: pixel_6
+        ram-size: 4096M
+        disk-size: 8G
+        script: |
+          # Start emulator and wait for boot
+          echo "Waiting for emulator to boot completely"
+          adb wait-for-device
+          
+          # Disable animations
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          
+          # Wait for system to be ready
+          timeout 300 sh -c 'until adb shell getprop sys.boot_completed; do sleep 1; done'
+          
+          # Check device status
+          adb devices
+          adb shell input keyevent 82
+          
+          # Run instrumentation tests with additional logging
+          ./gradlew connectedCheck \
+            -Pandroid.testInstrumentationRunnerArguments.listener=com.example.CustomTestListener \
+            --info --stacktrace
+
+    - name: Upload Test Reports
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: test-reports
+        path: |
+          app/build/reports/androidTests/connected/
+          app/build/outputs/androidTest-results/
+          
+    - name: Publish Test Report
+      uses: mikepenz/action-junit-report@v4
+      if: success() || failure()
+      with:
+        report_paths: '**/build/test-results/testDebugUnitTest/**.xml'
+        detailed_summary: true
+
+    - name: Send Slack Notification
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+    - name: Clean up
+      if: always()
+      run: |
+        adb kill-server
+        pkill -f "qemu"
+
+# Optional: Add code coverage and additional checks
+  code-quality:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
     - uses: actions/checkout@v4
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        java-version: '17'
-        distribution: 'temurin'
-
-    # Generates and submits a dependency graph, enabling Dependabot Alerts for all project dependencies.
-    # See: https://github.com/gradle/actions/blob/main/dependency-submission/README.md
-    - name: Generate and submit dependency graph
-      uses: gradle/actions/dependency-submission@af1da67850ed9a4cedd57bfd976089dd991e2582 # v4.0.0
+    - name: Run Ktlint
+      run: |
+        ./gradlew ktlintCheck
+    
+    - name: Run Detekt
+      run: |
+        ./gradlew detekt
